@@ -33,6 +33,7 @@ from . import downloader
 from .opus_loader import load_opus_lib
 from .constants import VERSION as BOTVERSION
 from .constants import DISCORD_MSG_CHAR_LIMIT, AUDIO_CACHE_PATH
+from discord.http import _func_
 
 
 load_opus_lib()
@@ -78,10 +79,11 @@ class MusicBot(discord.Client):
         self.blacklist = set(load_file(self.config.blacklist_file))
         self.autoplaylist = load_file(self.config.auto_playlist_file)
         self.downloader = downloader.Downloader(download_folder='audio_cache')
-
+        self.aiolocks = defaultdict(asyncio.Lock)
         self.exit_signal = None
         self.init_ok = False
         self.cached_client_id = None
+        self.last_status = None
 
         if not self.autoplaylist:
             print("Warning: Autoplaylist is empty, disabling.")
@@ -356,8 +358,8 @@ class MusicBot(discord.Client):
         if server.id not in self.players:
             if not create:
                 raise exceptions.CommandError(
-                    'The bot is not in a voice channel.  '
-                    'Use %ssummon to summon it to your voice channel.' % self.config.command_prefix)
+                    'BOT不再語音頻道  '
+                    '請使用 %ssummon 召喚機器人到您所在語音的頻道。' % self.config.command_prefix)
 
             voice_client = await self.get_voice_client(channel)
 
@@ -393,10 +395,10 @@ class MusicBot(discord.Client):
                     break  # This is probably redundant
 
             if self.config.now_playing_mentions:
-                newmsg = '%s - your song **%s** is now playing in %s!' % (
+                newmsg = 'Hi！%s\n\n您所點的歌曲 **%s**\n\n現正播映於 %s！' % (
                     entry.meta['author'].mention, entry.title, player.voice_client.channel.name)
             else:
-                newmsg = 'Now playing in %s: **%s**' % (
+                newmsg = '現在 %s 撥放的音樂是: **%s**' % (
                     player.voice_client.channel.name, entry.title)
 
             if self.server_specific_data[channel.server]['last_np_msg']:
@@ -464,7 +466,10 @@ class MusicBot(discord.Client):
             name = u'{}{}'.format(prefix, entry.title)[:128]
             game = discord.Game(name=name)
 
-        await self.change_status(game)
+        async with self.aiolocks[_func_()]:
+            if game != self.last_status:
+                await self.change_presence(game=game)
+                self.last_status = game
 
 
     async def safe_send_message(self, dest, content, *, tts=False, expire_in=0, also_delete=None, quiet=False):
@@ -722,12 +727,10 @@ class MusicBot(discord.Client):
 
     async def cmd_help(self, command=None):
         """
-        Usage:
+        使用方法:
             {command_prefix}help [command]
 
-        Prints a help message.
-        If a command is specified, it prints a help message for that command.
-        Otherwise, it lists the available commands.
+        查看指令的說明。
         """
 
         if command:
@@ -741,10 +744,10 @@ class MusicBot(discord.Client):
                     delete_after=60
                 )
             else:
-                return Response("No such command", delete_after=10)
+                return Response("找不到此指令。", delete_after=10)
 
         else:
-            helpmsg = "**Commands**\n```"
+            helpmsg = "**目前能用的指令：**\n```"
             commands = []
 
             for att in dir(self):
@@ -754,17 +757,16 @@ class MusicBot(discord.Client):
 
             helpmsg += ", ".join(commands)
             helpmsg += "```"
-            helpmsg += "https://github.com/SexualRhinoceros/MusicBot/wiki/Commands-list"
+            helpmsg += ""
 
             return Response(helpmsg, reply=True, delete_after=60)
 
     async def cmd_blacklist(self, message, user_mentions, option, something):
         """
-        Usage:
-            {command_prefix}blacklist [ + | - | add | remove ] @UserName [@UserName2 ...]
+        使用方法:
+            {command_prefix} blacklist [ + | - | add | remove ] @使用者名稱 [@使用者名稱2 ...]
 
-        Add or remove users to the blacklist.
-        Blacklisted users are forbidden from using bot commands.
+        添加或移除使用者進入黑名單，如果被添加在黑名單裡頭就無法使用指令了。
         """
 
         if not user_mentions:
@@ -772,7 +774,7 @@ class MusicBot(discord.Client):
 
         if option not in ['+', '-', 'add', 'remove']:
             raise exceptions.CommandError(
-                'Invalid option "%s" specified, use +, -, add, or remove' % option, expire_in=20
+                '請輸入正確的 "%s" 符號，可使用的有 +, -, add, or remove' % option, expire_in=20
             )
 
         for user in user_mentions.copy():
@@ -788,49 +790,49 @@ class MusicBot(discord.Client):
             write_file(self.config.blacklist_file, self.blacklist)
 
             return Response(
-                '%s users have been added to the blacklist' % (len(self.blacklist) - old_len),
+                '%s 該用戶已經被加入到黑名單裡了' % (len(self.blacklist) - old_len),
                 reply=True, delete_after=10
             )
 
         else:
             if self.blacklist.isdisjoint(user.id for user in user_mentions):
-                return Response('none of those users are in the blacklist.', reply=True, delete_after=10)
+                return Response('該用戶沒有在黑名單裡.', reply=True, delete_after=10)
 
             else:
                 self.blacklist.difference_update(user.id for user in user_mentions)
                 write_file(self.config.blacklist_file, self.blacklist)
 
                 return Response(
-                    '%s users have been removed from the blacklist' % (old_len - len(self.blacklist)),
+                    '%s 該用戶已經從黑名單移除' % (old_len - len(self.blacklist)),
                     reply=True, delete_after=10
                 )
 
     async def cmd_id(self, author, user_mentions):
         """
-        Usage:
+        使用方法:
             {command_prefix}id [@user]
 
-        Tells the user their id or the id of another user.
+        這方便於告訴你想知道的ID。
         """
         if not user_mentions:
-            return Response('your id is `%s`' % author.id, reply=True, delete_after=35)
+            return Response('您這隻的ID是: `%s`' % author.id, reply=True, delete_after=35)
         else:
             usr = user_mentions[0]
-            return Response("%s's id is `%s`" % (usr.name, usr.id), reply=True, delete_after=35)
+            return Response("%s's id 是 `%s`" % (usr.name, usr.id), reply=True, delete_after=35)
 
     @owner_only
     async def cmd_joinserver(self, message, server_link=None):
         """
-        Usage:
-            {command_prefix}joinserver invite_link
+        使用方法:
+            {command_prefix}joinserver 邀請碼連結
 
-        Asks the bot to join a server.  Note: Bot accounts cannot use invite links.
+        請BOT加入服務器 請注意:BOT帳號不能使用邀請連結！
         """
 
         if self.user.bot:
             url = await self.generate_invite_link()
             return Response(
-                "Bot accounts can't use invite links!  Click here to invite me: \n{}".format(url),
+                "BOT帳號不能使用邀請連結！請點擊這裡邀請我: \n{}".format(url),
                 reply=True, delete_after=30
             )
 
@@ -840,23 +842,23 @@ class MusicBot(discord.Client):
                 return Response(":+1:")
 
         except:
-            raise exceptions.CommandError('Invalid URL provided:\n{}\n'.format(server_link), expire_in=30)
+            raise exceptions.CommandError('提供了無效網址:\n{}\n'.format(server_link), expire_in=30)
 
     async def cmd_play(self, player, channel, author, permissions, leftover_args, song_url):
         """
-        Usage:
-            {command_prefix}play song_link
-            {command_prefix}play text to search for
+        使用方法:
+            {command_prefix}play 音樂網址
+            {command_prefix}play 音樂名字關鍵字
 
-        Adds the song to the playlist.  If a link is not provided, the first
-        result from a youtube search is added to the queue.
+        如果不是提供一個網址的話優先順序第一將歌曲添加到撥放清單
+        如果是來自YouTube等音樂網址的話需要排隊。
         """
 
         song_url = song_url.strip('<>')
 
         if permissions.max_songs and player.playlist.count_for_user(author) >= permissions.max_songs:
             raise exceptions.PermissionsError(
-                "You have reached your enqueued song limit (%s)" % permissions.max_songs, expire_in=30
+                "你已經不能再添加歌單了 (%s)" % permissions.max_songs, expire_in=30
             )
 
         await self.send_typing(channel)
@@ -870,7 +872,7 @@ class MusicBot(discord.Client):
             raise exceptions.CommandError(e, expire_in=30)
 
         if not info:
-            raise exceptions.CommandError("That video cannot be played.", expire_in=30)
+            raise exceptions.CommandError("那部影片無法撥放.", expire_in=30)
 
         # abstract the search handling away from the user
         # our ytdl options allow us to use search strings as input urls
@@ -888,8 +890,8 @@ class MusicBot(discord.Client):
 
             if not info:
                 raise exceptions.CommandError(
-                    "Error extracting info from search string, youtubedl returned no data.  "
-                    "You may need to restart the bot if this continues to happen.", expire_in=30
+                    "從搜索字符中提取訊息時發生錯誤.  "
+                    "如果這種情況繼續發生，您可能要重啟MusicBot.", expire_in=30
                 )
 
             if not all(info.get('entries', [])):
@@ -988,17 +990,17 @@ class MusicBot(discord.Client):
 
             if not listlen - drop_count:
                 raise exceptions.CommandError(
-                    "No songs were added, all songs were over max duration (%ss)" % permissions.max_song_length,
+                    "添加歌曲失敗，所有歌曲都超過了最大時間 (%ss)" % permissions.max_song_length,
                     expire_in=30
                 )
 
-            reply_text = "Enqueued **%s** songs to be played. Position in queue: %s"
+            reply_text = "已經將歌曲 **%s** 新增至歌單在: %s"
             btext = str(listlen - drop_count)
 
         else:
             if permissions.max_song_length and info.get('duration', 0) > permissions.max_song_length:
                 raise exceptions.PermissionsError(
-                    "Song duration exceeds limit (%s > %s)" % (info['duration'], permissions.max_song_length),
+                    "音樂超過最大限制時間 (%s > %s)" % (info['duration'], permissions.max_song_length),
                     expire_in=30
                 )
 
@@ -1015,17 +1017,18 @@ class MusicBot(discord.Client):
 
                 return await self.cmd_play(player, channel, author, permissions, leftover_args, e.use_url)
 
-            reply_text = "Enqueued **%s** to be played. Position in queue: %s"
+            reply_text = "已經將歌曲 **%s** 新增至歌單。\n\n目前歌單上有 %s 首等候播放的歌曲"
             btext = entry.title
 
         if position == 1 and player.is_stopped:
-            position = 'Up next!'
+            position = '1'
+            reply_text += '。'
             reply_text %= (btext, position)
 
         else:
             try:
                 time_until = await player.playlist.estimate_time_until(position, player)
-                reply_text += ' - estimated time until playing: %s'
+                reply_text += '，距離本首播放完畢的剩餘時間還有：%s。'
             except:
                 traceback.print_exc()
                 time_until = ''
@@ -1036,7 +1039,7 @@ class MusicBot(discord.Client):
 
     async def _cmd_play_playlist_async(self, player, channel, author, permissions, playlist_url, extractor_type):
         """
-        Secret handler to use the async wizardry to make playlist queuing non-"blocking"
+        私密處理程序使用異步嚮導屎播放清單表不易"阻塞"
         """
 
         await self.send_typing(channel)
@@ -1049,7 +1052,7 @@ class MusicBot(discord.Client):
         t0 = time.time()
 
         busymsg = await self.safe_send_message(
-            channel, "Processing %s songs..." % num_songs)  # TODO: From playlist_title
+            channel, "正在處理第 %s 首歌曲..." % num_songs)  # TODO: From playlist_title
         await self.send_typing(channel)
 
         entries_added = 0
@@ -1119,30 +1122,30 @@ class MusicBot(discord.Client):
         )
 
         if not songs_added:
-            basetext = "No songs were added, all songs were over max duration (%ss)" % permissions.max_song_length
+            basetext = "沒有歌曲加入清單因為這首歌超過最大持續時間 (%ss)" % permissions.max_song_length
             if skipped:
-                basetext += "\nAdditionally, the current song was skipped for being too long."
+                basetext += "\n由於這首歌撥放時間太長所以不加入清單."
 
             raise exceptions.CommandError(basetext, expire_in=30)
 
-        return Response("Enqueued {} songs to be played in {} seconds".format(
+        return Response("已經將{} 歌曲新增至播放清單中在 {} 秒撥放".format(
             songs_added, self._fixg(ttime, 1)), delete_after=30)
 
     async def cmd_search(self, player, channel, author, permissions, leftover_args):
         """
-        Usage:
-            {command_prefix}search [service] [number] query
+        使用方法:
+            {command_prefix}search [搜尋服務] [數字] 來查詢
 
-        Searches a service for a video and adds it to the queue.
-        - service: any one of the following services:
-            - youtube (yt) (default if unspecified)
+        搜尋一個影片視頻並將它加入撥放清單內.
+        - 搜尋服務: 下列服務任意選擇:
+            - youtube (yt) (如果未指定服務，這將是默認搜尋服務)
             - soundcloud (sc)
             - yahoo (yh)
-        - number: return a number of video results and waits for user to choose one
-          - defaults to 1 if unspecified
-          - note: If your search query starts with a number,
-                  you must put your query in quotes
-            - ex: {command_prefix}search 2 "I ran seagulls"
+        - 數字: 返回多個搜尋結果給用戶選擇
+          - 如果未指定，默認數量將為1
+          - 注意: 如果您搜尋以數字開頭,
+                  你必須將您的查詢引入雙引號
+            - 範例: {command_prefix}search 2 "PPAP"
         """
 
         if permissions.max_songs and player.playlist.count_for_user(author) > permissions.max_songs:
@@ -1201,7 +1204,7 @@ class MusicBot(discord.Client):
 
         search_query = '%s%s:%s' % (services[service], items_requested, ' '.join(leftover_args))
 
-        search_msg = await self.send_message(channel, "Searching for videos...")
+        search_msg = await self.send_message(channel, "搜尋中...")
         await self.send_typing(channel)
 
         try:
@@ -1224,10 +1227,10 @@ class MusicBot(discord.Client):
                 m.content.lower().startswith('exit'))
 
         for e in info['entries']:
-            result_message = await self.safe_send_message(channel, "Result %s/%s: %s" % (
+            result_message = await self.safe_send_message(channel, "結果 %s/%s: %s" % (
                 info['entries'].index(e) + 1, len(info['entries']), e['webpage_url']))
 
-            confirm_message = await self.safe_send_message(channel, "Is this ok? Type `y`, `n` or `exit`")
+            confirm_message = await self.safe_send_message(channel, "是這個對吧 請選擇 `y`, `n` 或者 `exit`")
             response_message = await self.wait_for_message(30, author=author, channel=channel, check=check)
 
             if not response_message:
@@ -1250,20 +1253,20 @@ class MusicBot(discord.Client):
 
                 await self.cmd_play(player, channel, author, permissions, [], e['webpage_url'])
 
-                return Response("Alright, coming right up!", delete_after=30)
+                return Response("已經將歌曲加入歌單!", delete_after=30)
             else:
                 await self.safe_delete_message(result_message)
                 await self.safe_delete_message(confirm_message)
                 await self.safe_delete_message(response_message)
 
-        return Response("Oh well :frowning:", delete_after=30)
+        return Response("好吧... 不是啊", delete_after=30)
 
     async def cmd_np(self, player, channel, server, message):
         """
-        Usage:
+        使用方法:
             {command_prefix}np
 
-        Displays the current song in chat.
+        查看當前播放的音樂。
         """
 
         if player.current_entry:
@@ -1276,25 +1279,25 @@ class MusicBot(discord.Client):
             prog_str = '`[%s/%s]`' % (song_progress, song_total)
 
             if player.current_entry.meta.get('channel', False) and player.current_entry.meta.get('author', False):
-                np_text = "Now Playing: **%s** added by **%s** %s\n" % (
+                np_text = "現正播映：**%s**\n\n點播者：**%s**\n\n當前歌曲播放時間：%s\n" % (
                     player.current_entry.title, player.current_entry.meta['author'].name, prog_str)
             else:
-                np_text = "Now Playing: **%s** %s\n" % (player.current_entry.title, prog_str)
+                np_text = "現正播映：**%s** %s\n" % (player.current_entry.title, prog_str)
 
             self.server_specific_data[server]['last_np_msg'] = await self.safe_send_message(channel, np_text)
             await self._manual_delete_check(message)
         else:
             return Response(
-                'There are no songs queued! Queue something with {}play.'.format(self.config.command_prefix),
+                '目前未有播放中的歌曲，請使用 {}play 來點歌！'.format(self.config.command_prefix),
                 delete_after=30
             )
 
     async def cmd_summon(self, channel, author, voice_channel):
         """
-        Usage:
+        使用方法:
             {command_prefix}summon
 
-        Call the bot to the summoner's voice channel.
+        召喚機器人到您所在語音的頻道。
         """
 
         if not author.voice_channel:
@@ -1332,10 +1335,10 @@ class MusicBot(discord.Client):
 
     async def cmd_pause(self, player):
         """
-        Usage:
+        使用方法:
             {command_prefix}pause
 
-        Pauses playback of the current song.
+        暫停當前播放的音樂。
         """
 
         if player.is_playing:
@@ -1346,21 +1349,21 @@ class MusicBot(discord.Client):
 
     async def cmd_resume(self, player):
         """
-        Usage:
+        使用方法:
             {command_prefix}resume
 
-        Resumes playback of a paused song.
+        開始已暫停的音樂。
         """
 
         if player.is_paused:
             player.resume()
 
         else:
-            raise exceptions.CommandError('Player is not paused.', expire_in=30)
+            raise exceptions.CommandError('目前沒有暫停的音樂', expire_in=30)
 
     async def cmd_shuffle(self, channel, player):
         """
-        Usage:
+        使用方法:
             {command_prefix}shuffle
 
         Shuffles the playlist.
@@ -1382,10 +1385,10 @@ class MusicBot(discord.Client):
 
     async def cmd_clear(self, player, author):
         """
-        Usage:
+        使用方法:
             {command_prefix}clear
 
-        Clears the playlist.
+        清除播放列表。
         """
 
         player.playlist.clear()
@@ -1393,20 +1396,20 @@ class MusicBot(discord.Client):
 
     async def cmd_skip(self, player, channel, author, message, permissions, voice_channel):
         """
-        Usage:
+        使用方法:
             {command_prefix}skip
 
-        Skips the current song when enough votes are cast, or by the bot owner.
+        必須要有足夠的投票或管理員才能跳過當前的音樂。
         """
 
         if player.is_stopped:
-            raise exceptions.CommandError("Can't skip! The player is not playing!", expire_in=20)
+            raise exceptions.CommandError("由於尚無音樂撥放，所以無法跳過！", expire_in=20)
 
         if not player.current_entry:
             if player.playlist.peek():
                 if player.playlist.peek()._is_downloading:
                     # print(player.playlist.peek()._waiting_futures[0].__dict__)
-                    return Response("The next song (%s) is downloading, please wait." % player.playlist.peek().title)
+                    return Response("下一首歌曲 (%s) 正在準備中，請稍候。" % player.playlist.peek().title)
 
                 elif player.playlist.peek().is_downloaded:
                     print("The next song will be played shortly.  Please wait.")
@@ -1439,10 +1442,10 @@ class MusicBot(discord.Client):
         if skips_remaining <= 0:
             player.skip()  # check autopause stuff here
             return Response(
-                'your skip for **{}** was acknowledged.'
-                '\nThe vote to skip has been passed.{}'.format(
+                '播放中的音樂 **{}** 已經跳過。'
+                '\n\n投票已經成立{}'.format(
                     player.current_entry.title,
-                    ' Next song coming up!' if player.playlist.peek() else ''
+                    '，正準備撥放下一首音樂。' if player.playlist.peek() else '。'
                 ),
                 reply=True,
                 delete_after=20
@@ -1451,11 +1454,10 @@ class MusicBot(discord.Client):
         else:
             # TODO: When a song gets skipped, delete the old x needed to skip messages
             return Response(
-                'your skip for **{}** was acknowledged.'
-                '\n**{}** more {} required to vote to skip this song.'.format(
+                '音樂 **{}** 無法跳過。'
+                '\n\n當前投票數：**{}**，需要更多人才能跳過此音樂。'.format(
                     player.current_entry.title,
-                    skips_remaining,
-                    'person is' if skips_remaining == 1 else 'people are'
+                    skips_remaining
                 ),
                 reply=True,
                 delete_after=20
@@ -1463,15 +1465,14 @@ class MusicBot(discord.Client):
 
     async def cmd_volume(self, message, player, new_volume=None):
         """
-        Usage:
+        使用方法:
             {command_prefix}volume (+/-)[volume]
 
-        Sets the playback volume. Accepted values are from 1 to 100.
-        Putting + or - before the volume will make the volume change relative to the current volume.
+        設定播放音量，接受數值範圍 1 至 100。
         """
 
         if not new_volume:
-            return Response('Current volume: `%s%%`' % int(player.volume * 100), reply=True, delete_after=20)
+            return Response('當前音量：`%s%%`' % int(player.volume * 100), reply=True, delete_after=20)
 
         relative = False
         if new_volume[0] in '+-':
@@ -1481,7 +1482,7 @@ class MusicBot(discord.Client):
             new_volume = int(new_volume)
 
         except ValueError:
-            raise exceptions.CommandError('{} is not a valid number'.format(new_volume), expire_in=20)
+            raise exceptions.CommandError('{} 不是一個正確的數字'.format(new_volume), expire_in=20)
 
         if relative:
             vol_change = new_volume
@@ -1492,28 +1493,28 @@ class MusicBot(discord.Client):
         if 0 < new_volume <= 100:
             player.volume = new_volume / 100.0
 
-            return Response('updated volume from %d to %d' % (old_volume, new_volume), reply=True, delete_after=20)
+            return Response('當前音量已經從 %d 調整至 %d。' % (old_volume, new_volume), reply=True, delete_after=20)
 
         else:
             if relative:
                 raise exceptions.CommandError(
-                    'Unreasonable volume change provided: {}{:+} -> {}%.  Provide a change between {} and {:+}.'.format(
+                    '您輸入了不合理的音量: {}{:+} -> {}%.  請提供一個值 {} 和 {:+}.'.format(
                         old_volume, vol_change, old_volume + vol_change, 1 - old_volume, 100 - old_volume), expire_in=20)
             else:
                 raise exceptions.CommandError(
-                    'Unreasonable volume provided: {}%. Provide a value between 1 and 100.'.format(new_volume), expire_in=20)
+                    '您所輸入的音量為：{}% 為異常範圍。\n\n音量調整範圍 1 至 100 %。'.format(new_volume), expire_in=20)
 
     async def cmd_queue(self, channel, player):
         """
-        Usage:
+        使用方法:
             {command_prefix}queue
 
-        Prints the current song queue.
+        列出當前的播放列表。
         """
 
         lines = []
         unlisted = 0
-        andmoretext = '* ... and %s more*' % ('x' * len(player.playlist.entries))
+        andmoretext = '* ... 和 %s 更多*' % ('x' * len(player.playlist.entries))
 
         if player.current_entry:
             song_progress = str(timedelta(seconds=player.progress)).lstrip('0').lstrip(':')
@@ -1521,14 +1522,13 @@ class MusicBot(discord.Client):
             prog_str = '`[%s/%s]`' % (song_progress, song_total)
 
             if player.current_entry.meta.get('channel', False) and player.current_entry.meta.get('author', False):
-                lines.append("Now Playing: **%s** added by **%s** %s\n" % (
+                lines.append("現正播映：**%s**\n\n點播者：**%s**\n\n當前歌曲播放時間：%s\n\n尚未撥放歌曲列表：" % (
                     player.current_entry.title, player.current_entry.meta['author'].name, prog_str))
             else:
-                lines.append("Now Playing: **%s** %s\n" % (player.current_entry.title, prog_str))
-
+                lines.append("現正播映：**%s**\n\n當前歌曲播放時間：%s\n" % (player.current_entry.title, prog_str))
         for i, item in enumerate(player.playlist, 1):
             if item.meta.get('channel', False) and item.meta.get('author', False):
-                nextline = '`{}.` **{}** added by **{}**'.format(i, item.title, item.meta['author'].name).strip()
+                nextline = '`{}.` **{}**，點播者：**{}**'.format(i, item.title, item.meta['author'].name).strip()
             else:
                 nextline = '`{}.` **{}**'.format(i, item.title).strip()
 
@@ -1538,32 +1538,32 @@ class MusicBot(discord.Client):
                 if currentlinesum + len(andmoretext):
                     unlisted += 1
                     continue
-
+            lines.append('')
             lines.append(nextline)
+			
 
         if unlisted:
-            lines.append('\n*... and %s more*' % unlisted)
-
+            lines.append('\n*...和 %s 更多*' % unlisted)
         if not lines:
             lines.append(
-                'There are no songs queued! Queue something with {}play.'.format(self.config.command_prefix))
+                '目前未有播放中的歌曲，請使用 {}play 來點歌！'.format(self.config.command_prefix))
 
         message = '\n'.join(lines)
         return Response(message, delete_after=30)
 
     async def cmd_clean(self, message, channel, server, author, search_range=50):
         """
-        Usage:
+        使用方法:
             {command_prefix}clean [range]
 
-        Removes up to [range] messages the bot has posted in chat. Default: 50, Max: 1000
+        刪除機器人之前的發言，範圍預設：50，最多：1000。
         """
 
         try:
             float(search_range)  # lazy check
             search_range = min(int(search_range), 1000)
         except:
-            return Response("enter a number.  NUMBER.  That means digits.  `15`.  Etc.", reply=True, delete_after=8)
+            return Response("輸入數字.  NUMBER.  這意味著數字.  `15`.  其它.", reply=True, delete_after=8)
 
         await self.safe_delete_message(message, quiet=True)
 
@@ -1607,30 +1607,30 @@ class MusicBot(discord.Client):
                     except discord.HTTPException:
                         pass
 
-        return Response('Cleaned up {} message{}.'.format(deleted, 's' * bool(deleted)), delete_after=15)
+        return Response('清除了 {} 訊息{}.'.format(deleted, 's' * bool(deleted)), delete_after=15)
 
     async def cmd_pldump(self, channel, song_url):
         """
-        Usage:
+        使用方法:
             {command_prefix}pldump url
 
-        Dumps the individual urls of a playlist
+        讀取該網址內的所有可撥放的音樂。
         """
 
         try:
             info = await self.downloader.extract_info(self.loop, song_url.strip('<>'), download=False, process=False)
         except Exception as e:
-            raise exceptions.CommandError("Could not extract info from input url\n%s\n" % e, expire_in=25)
+            raise exceptions.CommandError("無法從輸入網址提取信息\n%s\n" % e, expire_in=25)
 
         if not info:
-            raise exceptions.CommandError("Could not extract info from input url, no data.", expire_in=25)
+            raise exceptions.CommandError("無法從輸入網址提取信息資料", expire_in=25)
 
         if not info.get('entries', None):
             # TODO: Retarded playlist checking
             # set(url, webpageurl).difference(set(url))
 
             if info.get('url', None) != info.get('webpage_url', info.get('url', None)):
-                raise exceptions.CommandError("This does not seem to be a playlist.", expire_in=25)
+                raise exceptions.CommandError("這似乎不是播放列表.", expire_in=25)
             else:
                 return await self.cmd_pldump(channel, info.get(''))
 
@@ -1643,7 +1643,7 @@ class MusicBot(discord.Client):
         exfunc = linegens[info['extractor'].split(':')[0]]
 
         if not exfunc:
-            raise exceptions.CommandError("Could not extract info from input url, unsupported playlist type.", expire_in=25)
+            raise exceptions.CommandError("無法從輸入的網址提取訊息，因為這是不支持的播放類型.", expire_in=25)
 
         with BytesIO() as fcontent:
             for item in info['entries']:
@@ -1656,11 +1656,10 @@ class MusicBot(discord.Client):
 
     async def cmd_listids(self, server, author, leftover_args, cat='all'):
         """
-        Usage:
+        使用方法:
             {command_prefix}listids [categories]
 
-        Lists the ids for various things.  Categories are:
-           all, users, roles, channels
+        列出本頻道的所有 ID。
         """
 
         cats = ['channels', 'roles', 'users']
@@ -1714,13 +1713,13 @@ class MusicBot(discord.Client):
 
     async def cmd_perms(self, author, channel, server, permissions):
         """
-        Usage:
+        使用方法:
             {command_prefix}perms
 
-        Sends the user a list of their permissions.
+        讀取自身的權限。
         """
 
-        lines = ['Command permissions in %s\n' % server.name, '```', '```']
+        lines = ['在 %s 的權限:\n' % server.name, '```', '```']
 
         for perm in permissions.__dict__:
             if perm in ['user_list'] or permissions.__dict__[perm] == set():
@@ -1735,11 +1734,10 @@ class MusicBot(discord.Client):
     @owner_only
     async def cmd_setname(self, leftover_args, name):
         """
-        Usage:
+        使用方法:
             {command_prefix}setname name
 
-        Changes the bot's username.
-        Note: This operation is limited by discord to twice per hour.
+        設定機器人的名字。
         """
 
         name = ' '.join([name, *leftover_args])
@@ -1754,14 +1752,14 @@ class MusicBot(discord.Client):
     @owner_only
     async def cmd_setnick(self, server, channel, leftover_args, nick):
         """
-        Usage:
+        使用方法:
             {command_prefix}setnick nick
 
-        Changes the bot's nickname.
+        設定機器人在群組內的暱稱。
         """
 
         if not channel.permissions_for(server.me).change_nickname:
-            raise exceptions.CommandError("Unable to change nickname: no permission.")
+            raise exceptions.CommandError("沒有權限更改我的暱稱!")
 
         nick = ' '.join([nick, *leftover_args])
 
@@ -1775,11 +1773,10 @@ class MusicBot(discord.Client):
     @owner_only
     async def cmd_setavatar(self, message, url=None):
         """
-        Usage:
+        使用方法:
             {command_prefix}setavatar [url]
 
-        Changes the bot's avatar.
-        Attaching a file and leaving the url parameter blank also works.
+        設定機器人的大頭照。
         """
 
         if message.attachments:
@@ -1793,7 +1790,7 @@ class MusicBot(discord.Client):
                     await self.edit_profile(avatar=await res.read())
 
         except Exception as e:
-            raise exceptions.CommandError("Unable to change avatar: %s" % e, expire_in=20)
+            raise exceptions.CommandError("無法更改此頭像: %s" % e, expire_in=20)
 
         return Response(":ok_hand:", delete_after=20)
 
@@ -1903,18 +1900,18 @@ class MusicBot(discord.Client):
             if message.author.id != self.config.owner_id:
                 if user_permissions.command_whitelist and command not in user_permissions.command_whitelist:
                     raise exceptions.PermissionsError(
-                        "This command is not enabled for your group (%s)." % user_permissions.name,
+                        "你的群組沒有此指令 (%s)." % user_permissions.name,
                         expire_in=20)
 
                 elif user_permissions.command_blacklist and command in user_permissions.command_blacklist:
                     raise exceptions.PermissionsError(
-                        "This command is disabled for your group (%s)." % user_permissions.name,
+                        "你的群組已經禁止使用這個指令 (%s)." % user_permissions.name,
                         expire_in=20)
 
             if params:
                 docs = getattr(handler, '__doc__', None)
                 if not docs:
-                    docs = 'Usage: {}{} {}'.format(
+                    docs = '此指令使用方法: {}{} {}'.format(
                         self.config.command_prefix,
                         command,
                         ' '.join(args_expected)
@@ -1932,7 +1929,7 @@ class MusicBot(discord.Client):
             if response and isinstance(response, Response):
                 content = response.content
                 if response.reply:
-                    content = '%s, %s' % (message.author.mention, content)
+                    content = 'Hi！%s\n\n%s' % (message.author.mention, content)
 
                 sentmsg = await self.safe_send_message(
                     message.channel, content,
